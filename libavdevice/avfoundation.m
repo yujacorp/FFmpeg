@@ -110,6 +110,8 @@ typedef struct
 
     char            *video_filename;
     char            *audio_filename;
+    
+    bool            started_recording;
 
     int             num_video_devices;
 
@@ -170,7 +172,7 @@ typedef struct
 
     [lock lock];
 
-    if ([queue count] == QUEUE_SIZE) {
+    if ([queue count] == QUEUE_SIZE*4) {
         av_log(_context, AV_LOG_WARNING, "video queue is full, the oldest frame has been dropped\n");
         [queue removeLastObject];
     }
@@ -679,7 +681,7 @@ static int avf_read_header(AVFormatContext *s)
 
     ctx->lock = [[NSConditionLock alloc] initWithCondition:QUEUE_IS_EMPTY];
     ctx->video_queue = [[NSMutableArray alloc] initWithCapacity:QUEUE_SIZE];
-    ctx->audio_queue = [[NSMutableArray alloc] initWithCapacity:QUEUE_SIZE];
+    ctx->audio_queue = [[NSMutableArray alloc] initWithCapacity:QUEUE_SIZE*4];
 
 #if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
     CGGetActiveDisplayList(0, NULL, &num_screens);
@@ -843,6 +845,8 @@ static int avf_read_header(AVFormatContext *s)
              goto fail;
         }
     }
+    
+    ctx->started_recording = false;
 
     // Video nor Audio capture device not found, looking for AVMediaTypeVideo/Audio
     if (!video_device && !audio_device) {
@@ -899,35 +903,56 @@ fail:
 static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     AVFContext* ctx = (AVFContext*)s->priv_data;
-
+//    av_log(s, AV_LOG_DEBUG, "ssssssss");
+    bool gotVideo = false;
+    bool gotAudio = false;
     do {
         int got_buffer = 0;
         CMSampleBufferRef asample_buffer;
         CMSampleBufferRef vsample_buffer;
-
+        
         [ctx->lock lockWhenCondition:QUEUE_HAS_BUFFERS];
         vsample_buffer = (CMSampleBufferRef)[ctx->video_queue lastObject];
         if (vsample_buffer) {
+            if (!ctx->started_recording) {
+                ctx->started_recording = true;
+                av_log(s, AV_LOG_INFO, "started recording audio queuesize: %d", [ctx->audio_queue count]);
+            }
             vsample_buffer = (CMSampleBufferRef)CFRetain(vsample_buffer);
             [ctx->video_queue removeLastObject];
+            gotVideo = true;
 
             got_buffer |= 1;
+        } else {
+            asample_buffer = (CMSampleBufferRef)[ctx->audio_queue lastObject];
+            if (asample_buffer) {
+                asample_buffer = (CMSampleBufferRef)CFRetain(asample_buffer);
+                [ctx->audio_queue removeLastObject];
+                if (!ctx->started_recording) {
+                    av_log(s, AV_LOG_INFO, "dropped audio packet at beginning");
+                }
+                got_buffer |= 1;
+                gotAudio = true;
+            }
+        }
+        
+        if (!ctx->started_recording) {
+            continue;
         }
 
-        asample_buffer = (CMSampleBufferRef)[ctx->audio_queue lastObject];
-        if (asample_buffer) {
-            asample_buffer = (CMSampleBufferRef)CFRetain(asample_buffer);
-            [ctx->audio_queue removeLastObject];
-
-            got_buffer |= 1;
-        }
-
+        av_log(s, AV_LOG_DEBUG, "audio queue size: %d video queue size: %d\n", [ctx->audio_queue count], [ctx->video_queue count]);
+        
         if (!got_buffer || ([ctx->video_queue count] == 0 && [ctx->audio_queue count] == 0)) {
             [ctx->lock unlockWithCondition:QUEUE_IS_EMPTY];
+            av_log(s, AV_LOG_DEBUG, "queue is empty read packet\n");
         } else {
             [ctx->lock unlock];
         }
 
+        if (gotAudio && gotVideo) {
+            av_log(s, AV_LOG_DEBUG, "vsample_buffer asample_buffer both non nil!!!!\n");
+        }
+        
         if (vsample_buffer != nil) {
             void *data;
             CVImageBufferRef image_buffer;
@@ -945,6 +970,13 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (CMSampleBufferGetOutputSampleTimingInfoArray(vsample_buffer, 1, &timing_info, &count) == noErr) {
                 AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
                 pkt->pts = pkt->dts = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
+                if (count > 1) {
+                    av_log(s, AV_LOG_WARNING, "vsample CMSampleBufferGetOutputSampleTimingInfoArray count > 1\n");
+                }
+                av_log(s, AV_LOG_DEBUG, "vsample count: %ld timescale: %d avftimescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, avf_time_base_q.num, avf_time_base_q.den, timing_info.presentationTimeStamp.value, pkt->pts);
+
+            } else {
+                av_log(s, AV_LOG_DEBUG, "vsample time info error\n");
             }
 
             pkt->stream_index  = ctx->video_stream_index;
@@ -960,7 +992,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             vsample_buffer = NULL;
         }
 
-        if (asample_buffer != nil) {
+        else if (asample_buffer != nil) {
             CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(asample_buffer);
             int block_buffer_size         = CMBlockBufferGetDataLength(block_buffer);
 
@@ -980,8 +1012,15 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             CMSampleTimingInfo timing_info;
 
             if (CMSampleBufferGetOutputSampleTimingInfoArray(asample_buffer, 1, &timing_info, &count) == noErr) {
+                if (count > 1) {
+                    av_log(s, AV_LOG_WARNING, "asample CMSampleBufferGetOutputSampleTimingInfoArray count > 1\n");
+                }
+
                 AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
                 pkt->pts = pkt->dts = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
+                av_log(s, AV_LOG_DEBUG, "asample count: %ld timescale: %d timescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, timebase_q.num, timebase_q.den, timing_info.presentationTimeStamp.value, pkt->pts);
+            } else {
+                av_log(s, AV_LOG_DEBUG, "asample time info error\n");
             }
 
             pkt->stream_index  = ctx->audio_stream_index;

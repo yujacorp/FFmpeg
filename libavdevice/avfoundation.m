@@ -936,10 +936,6 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             }
         }
         
-        if (!ctx->started_recording) {
-            continue;
-        }
-
         av_log(s, AV_LOG_DEBUG, "audio queue size: %d video queue size: %d\n", [ctx->audio_queue count], [ctx->video_queue count]);
         
         if (!got_buffer || ([ctx->video_queue count] == 0 && [ctx->audio_queue count] == 0)) {
@@ -948,6 +944,12 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
         } else {
             [ctx->lock unlock];
         }
+
+        
+        if (!ctx->started_recording) {
+            continue;
+        }
+
 
         if (gotAudio && gotVideo) {
             av_log(s, AV_LOG_DEBUG, "vsample_buffer asample_buffer both non nil!!!!\n");

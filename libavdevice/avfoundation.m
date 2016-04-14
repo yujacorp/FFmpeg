@@ -320,9 +320,12 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
 
             for (range in [format valueForKey:@"videoSupportedFrameRateRanges"]) {
                 double max_framerate;
+                double min_framerate;
 
                 [[range valueForKey:@"maxFrameRate"] getValue:&max_framerate];
-                if (fabs (framerate - max_framerate) < 0.01) {
+                [[range valueForKey:@"minFrameRate"] getValue:&min_framerate];
+
+                if (framerate <= max_framerate && min_framerate <= framerate) {
                     selected_range = range;
                     break;
                 }
@@ -343,7 +346,8 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
     }
 
     if ([video_device lockForConfiguration:NULL] == YES) {
-        NSValue *min_frame_duration = [selected_range valueForKey:@"minFrameDuration"];
+        CMTime time = CMTimeMake(1, framerate);
+        NSValue *min_frame_duration = [NSValue valueWithCMTime:time];
 
         [video_device setValue:selected_format forKey:@"activeFormat"];
         [video_device setValue:min_frame_duration forKey:@"activeVideoMinFrameDuration"];
@@ -656,7 +660,7 @@ static int get_audio_config(AVFormatContext *s)
         ctx->audio_packed) {
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
     } else {
-        av_log(s, AV_LOG_ERROR, "audio format is not supported\n");
+        av_log(s, AV_LOG_ERROR, "audio format is not supported %d, %d, %d, %d \n", basic_desc->mFormatID, ctx->audio_bits_per_sample, ctx->audio_signed_integer, ctx->audio_packed);
         return 1;
     }
 
@@ -934,6 +938,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (!ctx->started_recording) {
                 ctx->started_recording = true;
                 av_log(s, AV_LOG_INFO, "started recording audio queuesize: %d", [ctx->audio_queue count]);
+                [ctx->audio_queue removeAllObjects];
             }
             vsample_buffer = (CMSampleBufferRef)CFRetain(vsample_buffer);
             [ctx->video_queue removeLastObject];

@@ -985,7 +985,7 @@ static void do_video_out(AVFormatContext *s,
             delta > 0 &&
             format_video_sync != VSYNC_PASSTHROUGH &&
             format_video_sync != VSYNC_DROP) {
-            if (delta0 < -0.6) {
+            if (delta0 < -1) {
                 av_log(NULL, AV_LOG_WARNING, "Past duration %f too large\n", -delta0);
             } else
                 av_log(NULL, AV_LOG_DEBUG, "Clipping frame in rate conversion by %f\n", -delta0);

@@ -113,6 +113,8 @@ typedef struct
     
     bool            started_recording;
     bool            dumpBuffer;
+    
+    bool            switch_packet;
 
     int             video_log;
     int             audio_log;
@@ -162,6 +164,7 @@ typedef struct
   didOutputSampleBuffer:(CMSampleBufferRef)videoFrame
          fromConnection:(AVCaptureConnection *)connection;
 
+- (void)captureOutput:(AVCaptureOutput *)captureOutput didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection;
 @end
 
 @implementation AVFFrameReceiver
@@ -174,21 +177,41 @@ typedef struct
     return self;
 }
 
+- (void)captureOutput:(AVCaptureOutput *)captureOutput didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    av_log(_context, AV_LOG_WARNING, "captureOutput dropped video sample buffer\n");
+}
+
 - (void)  captureOutput:(AVCaptureOutput *)captureOutput
   didOutputSampleBuffer:(CMSampleBufferRef)videoFrame
          fromConnection:(AVCaptureConnection *)connection
 {
     NSMutableArray *queue = _context->video_queue;
+    NSMutableArray *timeQueue = _context->video_time_queue;
     NSConditionLock *lock = _context->lock;
+
+    CMItemCount count;
+    CMSampleTimingInfo timing_info;
+    
+    unsigned long pkt_time = 0;
+//    pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
+
+    if (CMSampleBufferGetOutputSampleTimingInfoArray(videoFrame, 1, &timing_info, &count) == noErr) {
+        AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
+        pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
+    } else {
+        av_log(_context, AV_LOG_WARNING, "vsample time info error\n");
+    }
 
     [lock lock];
 
     if ([queue count] == QUEUE_SIZE) {
         av_log(_context, AV_LOG_WARNING, "video queue is full, the oldest frame has been dropped\n");
         [queue removeLastObject];
+        [timeQueue removeLastObject];
     }
 
     [queue insertObject:(id)videoFrame atIndex:0];
+    [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time] atIndex: 0];
 
     [lock unlockWithCondition:QUEUE_HAS_BUFFERS];
 
@@ -210,6 +233,9 @@ typedef struct
   didOutputSampleBuffer:(CMSampleBufferRef)audioFrame
          fromConnection:(AVCaptureConnection *)connection;
 
+- (void)captureOutput:(AVCaptureOutput *)captureOutput didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection;
+
+
 @end
 
 @implementation AVFAudioReceiver
@@ -222,21 +248,40 @@ typedef struct
     return self;
 }
 
+- (void)captureOutput:(AVCaptureOutput *)captureOutput didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    av_log(_context, AV_LOG_WARNING, "captureOutput dropped audio sample buffer\n");
+}
+
 - (void)  captureOutput:(AVCaptureOutput *)captureOutput
   didOutputSampleBuffer:(CMSampleBufferRef)audioFrame
          fromConnection:(AVCaptureConnection *)connection
 {
     NSMutableArray *queue = _context->audio_queue;
     NSConditionLock *lock = _context->lock;
+    NSMutableArray *timeQueue = _context->audio_time_queue;
+    
+    CMItemCount count;
+    CMSampleTimingInfo timing_info;
+    unsigned long pkt_time = 0;
+//    pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q)+AV_TIME_BASE_Q.den/3;
+
+    if (CMSampleBufferGetOutputSampleTimingInfoArray(audioFrame, 1, &timing_info, &count) == noErr) {
+        AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
+        pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
+    } else {
+        av_log(_context, AV_LOG_WARNING, "asample time info error\n");
+    }
 
     [lock lock];
 
     if ([queue count] == QUEUE_SIZE*7) {
         av_log(_context, AV_LOG_WARNING, "audio queue is full, the oldest frame has been dropped\n");
         [queue removeLastObject];
+        [timeQueue removeLastObject];
     }
 
     [queue insertObject:(id)audioFrame atIndex:0];
+    [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time] atIndex:0];
 
     [lock unlockWithCondition:QUEUE_HAS_BUFFERS];
 
@@ -265,6 +310,8 @@ static void destroy_context(AVFContext* ctx)
 
     [ctx->audio_queue release];
     [ctx->video_queue release];
+    [ctx->video_time_queue release];
+    [ctx->audio_time_queue release];
     [ctx->lock release];
 
     ctx->audio_queue = NULL;
@@ -498,6 +545,8 @@ static int add_video_device(AVFormatContext *s, AVCaptureDevice *video_device)
     ctx->avf_delegate = [[AVFFrameReceiver alloc] initWithContext:ctx];
 
     queue = dispatch_queue_create("avf_queue", NULL);
+//    queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
+
     [ctx->video_output setSampleBufferDelegate:ctx->avf_delegate queue:queue];
     dispatch_release(queue);
 
@@ -542,6 +591,8 @@ static int add_audio_device(AVFormatContext *s, AVCaptureDevice *audio_device)
     ctx->avf_audio_delegate = [[AVFAudioReceiver alloc] initWithContext:ctx];
 
     queue = dispatch_queue_create("avf_audio_queue", NULL);
+//    queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
+
     [ctx->audio_output setSampleBufferDelegate:ctx->avf_audio_delegate queue:queue];
     dispatch_release(queue);
 
@@ -590,7 +641,7 @@ static int get_video_config(AVFormatContext *s)
 
     [ctx->lock unlockWithCondition:QUEUE_HAS_BUFFERS];
 
-    [ctx->video_queue removeLastObject];
+//    [ctx->video_queue removeLastObject];
 
     return 0;
 }
@@ -638,26 +689,32 @@ static int get_audio_config(AVFormatContext *s)
     ctx->audio_signed_integer  = basic_desc->mFormatFlags & kAudioFormatFlagIsSignedInteger;
     ctx->audio_packed          = basic_desc->mFormatFlags & kAudioFormatFlagIsPacked;
     ctx->audio_non_interleaved = basic_desc->mFormatFlags & kAudioFormatFlagIsNonInterleaved;
-
+    if (ctx->audio_packed) {
+        av_log(s, AV_LOG_WARNING, "audio is not packed!!!\n");
+    }
     if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
         ctx->audio_float &&
-        ctx->audio_bits_per_sample == 32 &&
-        ctx->audio_packed) {
+        ctx->audio_bits_per_sample == 32
+//        &&ctx->audio_packed
+        ) {
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_F32BE : AV_CODEC_ID_PCM_F32LE;
     } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
         ctx->audio_signed_integer &&
-        ctx->audio_bits_per_sample == 16 &&
-        ctx->audio_packed) {
+        ctx->audio_bits_per_sample == 16
+//               &&ctx->audio_packed
+               ) {
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S16BE : AV_CODEC_ID_PCM_S16LE;
     } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
         ctx->audio_signed_integer &&
-        ctx->audio_bits_per_sample == 24 &&
-        ctx->audio_packed) {
+        ctx->audio_bits_per_sample == 24
+//               &&ctx->audio_packed
+               ) {
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S24BE : AV_CODEC_ID_PCM_S24LE;
     } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
         ctx->audio_signed_integer &&
-        ctx->audio_bits_per_sample == 32 &&
-        ctx->audio_packed) {
+        ctx->audio_bits_per_sample == 32
+//               &&ctx->audio_packed
+               ) {
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
     } else {
         av_log(s, AV_LOG_ERROR, "audio format is not supported %d, %d, %d, %d \n", basic_desc->mFormatID, ctx->audio_bits_per_sample, ctx->audio_signed_integer, ctx->audio_packed);
@@ -697,6 +754,9 @@ static int avf_read_header(AVFormatContext *s)
     ctx->lock = [[NSConditionLock alloc] initWithCondition:QUEUE_IS_EMPTY];
     ctx->video_queue = [[NSMutableArray alloc] initWithCapacity:QUEUE_SIZE];
     ctx->audio_queue = [[NSMutableArray alloc] initWithCapacity:QUEUE_SIZE*7];
+
+    ctx->video_time_queue = [[NSMutableArray alloc] initWithCapacity:QUEUE_SIZE];
+    ctx->audio_time_queue = [[NSMutableArray alloc] initWithCapacity:QUEUE_SIZE*7];
 
 #if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
     CGGetActiveDisplayList(0, NULL, &num_screens);
@@ -924,28 +984,46 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     AVFContext* ctx = (AVFContext*)s->priv_data;
 //    av_log(s, AV_LOG_DEBUG, "ssssssss");
-    bool gotVideo = false;
-    bool gotAudio = false;
+//    bool gotVideo = false;
+//    bool gotAudio = false;
     
     do {
         int got_buffer = 0;
-        CMSampleBufferRef asample_buffer;
-        CMSampleBufferRef vsample_buffer;
+        CMSampleBufferRef asample_buffer  = nil;
+        CMSampleBufferRef vsample_buffer =  nil;
+        
+        unsigned long timestamp = 0;
         
         [ctx->lock lockWhenCondition:QUEUE_HAS_BUFFERS];
-        vsample_buffer = (CMSampleBufferRef)[ctx->video_queue lastObject];
+        bool shouldProcessVideo = false;
+        bool shouldProcessAudio = false;
+        
+        int audioCount = [ctx->audio_queue count];
+        int videoCount = [ctx->video_queue count];
+        if (audioCount > videoCount*7) {
+            shouldProcessAudio = true;
+        } else {
+            shouldProcessVideo = true;
+        }
+        if (shouldProcessVideo) {
+            vsample_buffer = (CMSampleBufferRef)[ctx->video_queue lastObject];
+        }
         if (vsample_buffer) {
             if (!ctx->started_recording) {
                 ctx->started_recording = true;
                 av_log(s, AV_LOG_INFO, "started recording audio queuesize: %d", [ctx->audio_queue count]);
                 [ctx->audio_queue removeAllObjects];
+                [ctx->audio_time_queue removeAllObjects];
             }
             vsample_buffer = (CMSampleBufferRef)CFRetain(vsample_buffer);
+            timestamp = [(NSNumber *)[ctx->video_time_queue lastObject] unsignedLongValue];
+            
+            [ctx->video_time_queue removeLastObject];
             [ctx->video_queue removeLastObject];
 //            if (ctx->dumpBuffer) {
             
 //            } else {
-                gotVideo = true;
+//                gotVideo = true;
                 got_buffer |= 1;
 //            }
 //            ctx->dumpBuffer = !ctx->dumpBuffer;
@@ -953,8 +1031,11 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
         } else {
             asample_buffer = (CMSampleBufferRef)[ctx->audio_queue lastObject];
             if (asample_buffer) {
+                timestamp = [(NSNumber *)[ctx->audio_time_queue lastObject] unsignedLongValue];
                 asample_buffer = (CMSampleBufferRef)CFRetain(asample_buffer);
                 [ctx->audio_queue removeLastObject];
+                [ctx->audio_time_queue removeLastObject];
+
                 if (!ctx->started_recording) {
                     av_log(s, AV_LOG_INFO, "dropped audio packet at beginning");
                 }
@@ -963,7 +1044,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 
 //                } else {
                     got_buffer |= 1;
-                    gotAudio = true;
+//                    gotAudio = true;
 //                }
 //                ctx->dumpBuffer = !ctx->dumpBuffer;
 
@@ -985,9 +1066,9 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
         }
 
 
-        if (gotAudio && gotVideo) {
-            av_log(s, AV_LOG_DEBUG, "vsample_buffer asample_buffer both non nil!!!!\n");
-        }
+//        if (gotAudio && gotVideo) {
+//            av_log(s, AV_LOG_DEBUG, "vsample_buffer asample_buffer both non nil!!!!\n");
+//        }
         
         if (vsample_buffer != nil) {
             void *data;
@@ -999,43 +1080,43 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 CFRelease(vsample_buffer);
                 return AVERROR(EIO);
             }
-
-            CMItemCount count;
-            CMSampleTimingInfo timing_info;
-
-            if (CMSampleBufferGetOutputSampleTimingInfoArray(vsample_buffer, 1, &timing_info, &count) == noErr) {
-                AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
-//                pkt->pts = pkt->dts =
-//                unsigned long pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
-                unsigned long pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
-//                unsigned long pkt_time = ctx->last_pkt_time+1;
-                pkt->dts = pkt->pts = pkt_time;
-                if (ctx->last_video_pkt_time != 0) {
-                    pkt->duration = (pkt_time - ctx->last_video_pkt_time);
-                }
-                
-//                if (ctx->last_pkt_time != 0 && pkt_time - ctx->last_pkt_time > avf_time_base_q.den/2) {
-//                    av_log(s, AV_LOG_WARNING, "Detected large pkt diff\n");
-//                }
-                ctx->last_video_pkt_time = pkt_time;
-                
-//                pkt->dts = pkt->pts = 0;
-//                if (count > 1) {
-//                    av_log(s, AV_LOG_WARNING, "vsample CMSampleBufferGetOutputSampleTimingInfoArray count > 1\n");
-//                }
-                
-//                ctx->video_log++;
-//                if (ctx->video_log > 60) {
-//                    ctx->video_log = 0;
-//                    av_log(s, AV_LOG_INFO, "vsample count: %ld timescale: %d avftimescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, avf_time_base_q.num, avf_time_base_q.den, timing_info.presentationTimeStamp.value, pkt_time);
+            pkt->dts = pkt->pts = timestamp;
+//            CMItemCount count;
+//            CMSampleTimingInfo timing_info;
 //
-////                    av_log(s, AV_LOG_INFO, "vsample count: %ld timescale: %d avftimescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, avf_time_base_q.num, avf_time_base_q.den, timing_info.presentationTimeStamp.value, pkt->pts);
-//                }
-                
-
-            } else {
-                av_log(s, AV_LOG_DEBUG, "vsample time info error\n");
-            }
+//            if (CMSampleBufferGetOutputSampleTimingInfoArray(vsample_buffer, 1, &timing_info, &count) == noErr) {
+////                pkt->pts = pkt->dts =
+////                unsigned long pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
+//                AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
+//                unsigned long pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
+////                unsigned long pkt_time = ctx->last_pkt_time+1;
+//                pkt->dts = pkt->pts = pkt_time;
+////                if (ctx->last_video_pkt_time != 0) {
+////                    pkt->duration = (pkt_time - ctx->last_video_pkt_time);
+////                }
+//                
+////                if (ctx->last_pkt_time != 0 && pkt_time - ctx->last_pkt_time > avf_time_base_q.den/2) {
+////                    av_log(s, AV_LOG_WARNING, "Detected large pkt diff\n");
+////                }
+//                ctx->last_video_pkt_time = pkt_time;
+//                
+////                pkt->dts = pkt->pts = 0;
+////                if (count > 1) {
+////                    av_log(s, AV_LOG_WARNING, "vsample CMSampleBufferGetOutputSampleTimingInfoArray count > 1\n");
+////                }
+//                
+////                ctx->video_log++;
+////                if (ctx->video_log > 60) {
+////                    ctx->video_log = 0;
+////                    av_log(s, AV_LOG_INFO, "vsample count: %ld timescale: %d avftimescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, avf_time_base_q.num, avf_time_base_q.den, timing_info.presentationTimeStamp.value, pkt_time);
+////
+//////                    av_log(s, AV_LOG_INFO, "vsample count: %ld timescale: %d avftimescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, avf_time_base_q.num, avf_time_base_q.den, timing_info.presentationTimeStamp.value, pkt->pts);
+////                }
+//                
+//
+//            } else {
+//                av_log(s, AV_LOG_DEBUG, "vsample time info error\n");
+//            }
 
             pkt->stream_index  = ctx->video_stream_index;
             pkt->flags        |= AV_PKT_FLAG_KEY;
@@ -1065,44 +1146,45 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (av_new_packet(pkt, block_buffer_size) < 0) {
                 return AVERROR(EIO);
             }
+            pkt->dts = pkt->pts = timestamp;
 
-            CMItemCount count;
-            CMSampleTimingInfo timing_info;
-
-            if (CMSampleBufferGetOutputSampleTimingInfoArray(asample_buffer, 1, &timing_info, &count) == noErr) {
-                if (count > 1) {
-                    av_log(s, AV_LOG_WARNING, "asample CMSampleBufferGetOutputSampleTimingInfoArray count > 1\n");
-                }
-
-                AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
-//                pkt->pts = pkt->dts = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
-                
-//                pkt->dts = pkt->pts = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
-//                pkt->dts = pkt->pts = 0;
-                //                pkt->pts = pkt->dts = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
-//                unsigned long pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
-                unsigned long pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
-                
-                if (ctx->last_audio_pkt_time != 0) {
-                    pkt->duration = pkt_time - ctx->last_audio_pkt_time;
-                }
-
-                pkt->dts = pkt->pts = pkt_time;
-//                if (ctx->last_pkt_time != 0 && pkt_time - ctx->last_pkt_time > avf_time_base_q.den/2) {
-//                    av_log(s, AV_LOG_WARNING, "Detected large pkt diff\n");
-//                }
-                ctx->last_audio_pkt_time = pkt_time;
+//            CMItemCount count;
+//            CMSampleTimingInfo timing_info;
 //
-//                ctx->audio_log++;
-//                if (ctx->audio_log > 7*60) {
-//                    ctx->audio_log = 0;
-//                    av_log(s, AV_LOG_INFO, "asample count: %ld timescale: %d timescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, AV_TIME_BASE_Q.num, AV_TIME_BASE_Q.den, timing_info.presentationTimeStamp.value, pkt->pts);
-//
-////                    av_log(s, AV_LOG_INFO, "asample count: %ld timescale: %d timescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, timebase_q.num, timebase_q.den, timing_info.presentationTimeStamp.value, pkt->pts);
+//            if (CMSampleBufferGetOutputSampleTimingInfoArray(asample_buffer, 1, &timing_info, &count) == noErr) {
+//                if (count > 1) {
+//                    av_log(s, AV_LOG_WARNING, "asample CMSampleBufferGetOutputSampleTimingInfoArray count > 1\n");
 //                }
-            } else {
-                av_log(s, AV_LOG_DEBUG, "asample time info error\n");
-            }
+//
+//                AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
+////                pkt->pts = pkt->dts = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
+//                
+////                pkt->dts = pkt->pts = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
+////                pkt->dts = pkt->pts = 0;
+//                //                pkt->pts = pkt->dts = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
+////                unsigned long pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
+//                unsigned long pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
+//                
+////                if (ctx->last_audio_pkt_time != 0) {
+////                    pkt->duration = pkt_time - ctx->last_audio_pkt_time;
+////                }
+//
+//                pkt->dts = pkt->pts = pkt_time;
+////                if (ctx->last_pkt_time != 0 && pkt_time - ctx->last_pkt_time > avf_time_base_q.den/2) {
+////                    av_log(s, AV_LOG_WARNING, "Detected large pkt diff\n");
+////                }
+//                ctx->last_audio_pkt_time = pkt_time;
+////
+////                ctx->audio_log++;
+////                if (ctx->audio_log > 7*60) {
+////                    ctx->audio_log = 0;
+////                    av_log(s, AV_LOG_INFO, "asample count: %ld timescale: %d timescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, AV_TIME_BASE_Q.num, AV_TIME_BASE_Q.den, timing_info.presentationTimeStamp.value, pkt->pts);
+////
+//////                    av_log(s, AV_LOG_INFO, "asample count: %ld timescale: %d timescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, timebase_q.num, timebase_q.den, timing_info.presentationTimeStamp.value, pkt->pts);
+////                }
+//            } else {
+//                av_log(s, AV_LOG_DEBUG, "asample time info error\n");
+//            }
 
             pkt->stream_index  = ctx->audio_stream_index;
             pkt->flags        |= AV_PKT_FLAG_KEY;

@@ -26,6 +26,8 @@
  */
 
 #import <AVFoundation/AVFoundation.h>
+#import <CoreMedia/CoreMedia.h>
+
 #include <pthread.h>
 
 #include "libavutil/pixdesc.h"
@@ -95,6 +97,9 @@ typedef struct
     int64_t         first_audio_pts;
     id              avf_delegate;
     id              avf_audio_delegate;
+    int             list_audio_formats;
+
+    AVCaptureDeviceFormat *audio_format;
 
     AVRational      framerate;
     int             width, height;
@@ -121,7 +126,11 @@ typedef struct
 
     unsigned long last_audio_pkt_time;
     unsigned long last_video_pkt_time;
-
+    
+    unsigned long pkt_index;
+    long pkt_count;
+    unsigned long first_packet_time;
+    
     int             num_video_devices;
 
     int             audio_channels;
@@ -156,6 +165,8 @@ typedef struct
 @interface AVFFrameReceiver : NSObject
 {
     AVFContext* _context;
+    AVFContext* ctx;
+
 }
 
 - (id)initWithContext:(AVFContext*)context;
@@ -173,6 +184,7 @@ typedef struct
 {
     if (self = [super init]) {
         _context = context;
+        ctx = context;
     }
     return self;
 }
@@ -201,17 +213,62 @@ typedef struct
     } else {
         av_log(_context, AV_LOG_WARNING, "vsample time info error\n");
     }
+    
+    if (ctx->first_packet_time == 0) {
+        ctx->first_packet_time = pkt_time;
+    }
+    
+//    if (current_s != t_d) then
+//        if (count > 0 && count != 15) then
+//            puts "#{t_d}: #{count}"
+//            end
+//            current_s = t_d
+//            count = 1;
+//        else
+//            count = count + 1
+//            end
+    int numberToDrop = 0;
+    int numberToDuplicate = 0;
+    unsigned long time_s = (pkt_time - ctx->first_packet_time + 1000000/ctx->framerate.num/2)/1000000;
+    //av_log(_context, AV_LOG_WARNING, "time_s: %ld pkt_index: %ld first_pkt %ld framerate: %ld\n", time_s, ctx->pkt_index, ctx->first_packet_time, ctx->framerate.num);
 
+    if (time_s != ctx->pkt_index) {
+        if (ctx->pkt_count != ctx->framerate.num) {
+            int diff = ctx->pkt_count - ctx->framerate.num;
+            if (diff > 0) {
+                ctx->pkt_count = 1 + diff - 1;
+                numberToDrop = 1;
+                av_log(_context, AV_LOG_WARNING, "dropping 1 packet %d \n", diff);
+            } else {
+                ctx->pkt_count = 1 + diff + 1;
+                numberToDuplicate = 1;
+                av_log(_context, AV_LOG_WARNING, "duplicating 1 packet %d \n", diff);
+            }
+        } else {
+            ctx->pkt_count = 1;
+        }
+        ctx->pkt_index = time_s;
+    } else {
+        ctx->pkt_count++;
+//        av_log(_context, AV_LOG_WARNING, "count %ld\n", ctx->pkt_count);
+    }
+    
     [lock lock];
-
+    
     if ([queue count] == QUEUE_SIZE) {
         av_log(_context, AV_LOG_WARNING, "video queue is full, the oldest frame has been dropped\n");
+        ctx->pkt_count--;
         [queue removeLastObject];
         [timeQueue removeLastObject];
     }
-
-    [queue insertObject:(id)videoFrame atIndex:0];
-    [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time] atIndex: 0];
+    if (numberToDuplicate) {
+        [queue insertObject:(id)videoFrame atIndex:0];
+        [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time-1] atIndex: 0];
+    }
+    if (!numberToDrop) {
+        [queue insertObject:(id)videoFrame atIndex:0];
+        [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time] atIndex: 0];
+    }
 
     [lock unlockWithCondition:QUEUE_HAS_BUFFERS];
 
@@ -331,6 +388,49 @@ static void parse_device_name(AVFormatContext *s)
     } else {
         ctx->audio_filename = av_strtok(tmp,  ":", &save);
     }
+}
+
+static enum AVCodecID get_audio_codec_id(AVCaptureDeviceFormat *audio_format)
+{
+    AudioStreamBasicDescription *audio_format_desc =
+    (AudioStreamBasicDescription*)CMAudioFormatDescriptionGetStreamBasicDescription(audio_format.formatDescription);
+    int audio_linear          = audio_format_desc->mFormatID ==
+    kAudioFormatLinearPCM;
+    int audio_bits_per_sample = audio_format_desc->mBitsPerChannel;
+    int audio_float           = audio_format_desc->mFormatFlags &
+    kAudioFormatFlagIsFloat;
+    int audio_be              = audio_format_desc->mFormatFlags &
+    kAudioFormatFlagIsBigEndian;
+    int audio_signed_integer  = audio_format_desc->mFormatFlags &
+    kAudioFormatFlagIsSignedInteger;
+    int audio_packed          = audio_format_desc->mFormatFlags &
+    kAudioFormatFlagIsPacked;
+    
+    enum AVCodecID ret = AV_CODEC_ID_NONE;
+    
+    if (audio_linear &&
+        audio_float &&
+        audio_bits_per_sample == 32 &&
+        audio_packed) {
+        ret = audio_be ? AV_CODEC_ID_PCM_F32BE : AV_CODEC_ID_PCM_F32LE;
+    } else if (audio_linear &&
+               audio_signed_integer &&
+               audio_bits_per_sample == 16 &&
+               audio_packed) {
+        ret = audio_be ? AV_CODEC_ID_PCM_S16BE : AV_CODEC_ID_PCM_S16LE;
+    } else if (audio_linear &&
+               audio_signed_integer &&
+               audio_bits_per_sample == 24 &&
+               audio_packed) {
+        ret = audio_be ? AV_CODEC_ID_PCM_S24BE : AV_CODEC_ID_PCM_S24LE;
+    } else if (audio_linear &&
+               audio_signed_integer &&
+               audio_bits_per_sample == 32 &&
+               audio_packed) {
+        ret = audio_be ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
+    }
+    
+    return ret;
 }
 
 /**
@@ -595,6 +695,14 @@ static int add_audio_device(AVFormatContext *s, AVCaptureDevice *audio_device)
 
     [ctx->audio_output setSampleBufferDelegate:ctx->avf_audio_delegate queue:queue];
     dispatch_release(queue);
+    
+    if ([audio_device lockForConfiguration:NULL] == YES) {
+        audio_device.activeFormat = ctx->audio_format;
+    } else {
+        av_log(s, AV_LOG_ERROR, "Could not lock audio device for configuration");
+        return AVERROR(EINVAL);
+    }
+
 
     if ([ctx->capture_session canAddOutput:ctx->audio_output]) {
         [ctx->capture_session addOutput:ctx->audio_output];
@@ -689,7 +797,7 @@ static int get_audio_config(AVFormatContext *s)
     ctx->audio_signed_integer  = basic_desc->mFormatFlags & kAudioFormatFlagIsSignedInteger;
     ctx->audio_packed          = basic_desc->mFormatFlags & kAudioFormatFlagIsPacked;
     ctx->audio_non_interleaved = basic_desc->mFormatFlags & kAudioFormatFlagIsNonInterleaved;
-    if (ctx->audio_packed) {
+    if (!ctx->audio_packed) {
         av_log(s, AV_LOG_WARNING, "audio is not packed!!!\n");
     }
     if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
@@ -920,6 +1028,64 @@ static int avf_read_header(AVFormatContext *s)
              goto fail;
         }
     }
+
+    int idx = 0;
+    for (AVCaptureDeviceFormat *format in audio_device.formats) {
+        
+        if (get_audio_codec_id(format) == AV_CODEC_ID_PCM_S16BE || get_audio_codec_id(format) == AV_CODEC_ID_PCM_S16LE) {
+            ctx->audio_format       = format;
+            //                ctx->audio_format_index = idx;
+            av_log(ctx, AV_LOG_INFO, "Selected preferred audio format %d\n", idx);
+            
+            break;
+        }
+        idx++;
+    }
+    
+    if (!ctx->audio_format) {
+        for (AVCaptureDeviceFormat *format in audio_device.formats) {
+            if (get_audio_codec_id(format) != AV_CODEC_ID_NONE) {
+                ctx->audio_format       = format;
+                //                ctx->audio_format_index = idx;
+            }
+        }
+        
+    }
+
+    // list all audio formats if requested
+    if (ctx->list_audio_formats) {
+//        av_log(ctx, AV_LOG_ERROR, "Test\n");
+        int idx = 0;
+        for (AVCaptureDeviceFormat *format in audio_device.formats) {
+            if (get_audio_codec_id(format) != AV_CODEC_ID_NONE) {
+                AudioStreamBasicDescription *audio_format_desc =
+                (AudioStreamBasicDescription*)CMAudioFormatDescriptionGetStreamBasicDescription(format.formatDescription);
+                av_log(ctx, AV_LOG_INFO, "Format %d:\n", idx++);
+                av_log(ctx, AV_LOG_INFO, "\tsample rate     = %f\n",
+                       audio_format_desc->mSampleRate);
+                av_log(ctx, AV_LOG_INFO, "\tchannels        = %d\n",
+                       audio_format_desc->mChannelsPerFrame);
+                av_log(ctx, AV_LOG_INFO, "\tbits per sample = %d\n",
+                       audio_format_desc->mBitsPerChannel);
+                av_log(ctx, AV_LOG_INFO, "\tfloat           = %d\n",
+                       (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsFloat));
+                av_log(ctx, AV_LOG_INFO, "\tbig endian      = %d\n",
+                       (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsBigEndian));
+                av_log(ctx, AV_LOG_INFO, "\tsigned integer  = %d\n",
+                       (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsSignedInteger));
+                av_log(ctx, AV_LOG_INFO, "\tpacked          = %d\n",
+                       (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsPacked));
+                av_log(ctx, AV_LOG_INFO, "\tnon interleaved = %d\n",
+                       (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsNonInterleaved));
+            } else {
+                av_log(ctx, AV_LOG_INFO, "Format %d: (unsupported)\n", idx++);
+            }
+            
+        }
+        
+        goto fail;
+    }
+
     
     ctx->started_recording = false;
     ctx->dumpBuffer = false;
@@ -927,6 +1093,9 @@ static int avf_read_header(AVFormatContext *s)
     ctx->video_log = 0;
     ctx->last_video_pkt_time = 0;
     ctx->last_audio_pkt_time = 0;
+    ctx->pkt_index = 0;
+    ctx->pkt_count = 0;
+    ctx->first_packet_time = 0;
 
     // Video nor Audio capture device not found, looking for AVMediaTypeVideo/Audio
     if (!video_device && !audio_device) {
@@ -960,6 +1129,10 @@ static int avf_read_header(AVFormatContext *s)
      * does not reset the capture formats */
     if (!capture_screen) {
         [video_device unlockForConfiguration];
+    }
+
+    if (audio_device) {
+        [audio_device unlockForConfiguration];
     }
 
     if (video_device && get_video_config(s)) {
@@ -1248,6 +1421,9 @@ static const AVOption options[] = {
     { "list_devices", "list available devices", offsetof(AVFContext, list_devices), AV_OPT_TYPE_INT, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM, "list_devices" },
     { "true", "", 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, "list_devices" },
     { "false", "", 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, "list_devices" },
+    { "list_audio_formats", "list available audio formats", offsetof(AVFContext, list_audio_formats), AV_OPT_TYPE_INT, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM, "list_audio_formats" },
+    { "true", "", 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, "list_audio_formats" },
+    { "false", "", 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, "list_audio_formats" },
     { "video_device_index", "select video device by index for devices with same name (starts at 0)", offsetof(AVFContext, video_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { "audio_device_index", "select audio device by index for devices with same name (starts at 0)", offsetof(AVFContext, audio_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { "pixel_format", "set pixel format", offsetof(AVFContext, pixel_format), AV_OPT_TYPE_PIXEL_FMT, {.i64 = AV_PIX_FMT_YUV420P}, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM},

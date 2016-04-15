@@ -696,11 +696,13 @@ static int add_audio_device(AVFormatContext *s, AVCaptureDevice *audio_device)
     [ctx->audio_output setSampleBufferDelegate:ctx->avf_audio_delegate queue:queue];
     dispatch_release(queue);
     
-    if ([audio_device lockForConfiguration:NULL] == YES) {
-        audio_device.activeFormat = ctx->audio_format;
-    } else {
-        av_log(s, AV_LOG_ERROR, "Could not lock audio device for configuration");
-        return AVERROR(EINVAL);
+    if (ctx->audio_format) {
+        if ([audio_device lockForConfiguration:NULL] == YES) {
+            audio_device.activeFormat = ctx->audio_format;
+        } else {
+            av_log(s, AV_LOG_ERROR, "Could not lock audio device for configuration");
+            return AVERROR(EINVAL);
+        }
     }
 
 
@@ -803,26 +805,31 @@ static int get_audio_config(AVFormatContext *s)
     if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
         ctx->audio_float &&
         ctx->audio_bits_per_sample == 32
-//        &&ctx->audio_packed
+        &&ctx->audio_packed
         ) {
+        av_log(s, AV_LOG_WARNING, "audio is 32!!!\n");
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_F32BE : AV_CODEC_ID_PCM_F32LE;
     } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
         ctx->audio_signed_integer &&
         ctx->audio_bits_per_sample == 16
-//               &&ctx->audio_packed
+               &&ctx->audio_packed
                ) {
+        av_log(s, AV_LOG_WARNING, "audio is 16!!!\n");
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S16BE : AV_CODEC_ID_PCM_S16LE;
     } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
         ctx->audio_signed_integer &&
         ctx->audio_bits_per_sample == 24
-//               &&ctx->audio_packed
+               &&ctx->audio_packed
                ) {
+        av_log(s, AV_LOG_WARNING, "audio is 24!!!\n");
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S24BE : AV_CODEC_ID_PCM_S24LE;
     } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
         ctx->audio_signed_integer &&
         ctx->audio_bits_per_sample == 32
-//               &&ctx->audio_packed
+               &&ctx->audio_packed
                ) {
+        av_log(s, AV_LOG_WARNING, "audio is 32!!!\n");
+
         stream->codec->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
     } else {
         av_log(s, AV_LOG_ERROR, "audio format is not supported %d, %d, %d, %d \n", basic_desc->mFormatID, ctx->audio_bits_per_sample, ctx->audio_signed_integer, ctx->audio_packed);
@@ -1032,7 +1039,7 @@ static int avf_read_header(AVFormatContext *s)
     int idx = 0;
     for (AVCaptureDeviceFormat *format in audio_device.formats) {
         
-        if (get_audio_codec_id(format) == AV_CODEC_ID_PCM_S16BE || get_audio_codec_id(format) == AV_CODEC_ID_PCM_S16LE) {
+        if (get_audio_codec_id(format) == AV_CODEC_ID_PCM_F32BE || get_audio_codec_id(format) == AV_CODEC_ID_PCM_F32LE) {
             ctx->audio_format       = format;
             //                ctx->audio_format_index = idx;
             av_log(ctx, AV_LOG_INFO, "Selected preferred audio format %d\n", idx);
@@ -1210,7 +1217,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 [ctx->audio_time_queue removeLastObject];
 
                 if (!ctx->started_recording) {
-                    av_log(s, AV_LOG_INFO, "dropped audio packet at beginning");
+                    av_log(s, AV_LOG_INFO, "dropped audio packet at beginning\n");
                 }
                 
 //                if (ctx->dumpBuffer) {

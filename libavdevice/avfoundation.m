@@ -472,7 +472,7 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
                 [[range valueForKey:@"maxFrameRate"] getValue:&max_framerate];
                 [[range valueForKey:@"minFrameRate"] getValue:&min_framerate];
 
-                if (framerate <= max_framerate && min_framerate <= framerate) {
+                if (framerate <= (max_framerate + 0.01) && (min_framerate-0.01) <= framerate) {
                     selected_range = range;
                     break;
                 }

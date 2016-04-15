@@ -452,6 +452,8 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
     NSObject *format = nil;
     NSObject *selected_range = nil;
     NSObject *selected_format = nil;
+    
+    bool oldCam = false;
 
     for (format in [video_device valueForKey:@"formats"]) {
         CMFormatDescriptionRef formatDescription;
@@ -471,6 +473,10 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
 
                 [[range valueForKey:@"maxFrameRate"] getValue:&max_framerate];
                 [[range valueForKey:@"minFrameRate"] getValue:&min_framerate];
+                
+                if (max_framerate - min_framerate < 0.5) {
+                    oldCam = true;
+                }
 
                 if (framerate <= (max_framerate + 0.01) && (min_framerate-0.01) <= framerate) {
                     selected_range = range;
@@ -495,7 +501,10 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
     if ([video_device lockForConfiguration:NULL] == YES) {
         CMTime time = CMTimeMake(1, framerate);
         NSValue *min_frame_duration = [NSValue valueWithCMTime:time];
-
+        if (oldCam) {
+            min_frame_duration = [selected_range valueForKey:@"minFrameDuration"];
+        }
+        
         [video_device setValue:selected_format forKey:@"activeFormat"];
         [video_device setValue:min_frame_duration forKey:@"activeVideoMinFrameDuration"];
         [video_device setValue:min_frame_duration forKey:@"activeVideoMaxFrameDuration"];

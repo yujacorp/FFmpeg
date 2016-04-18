@@ -217,6 +217,7 @@ typedef struct
     
     if (ctx->first_packet_time == 0) {
         ctx->first_packet_time = pkt_time;
+        ctx->first_pts = pkt_time;
     }
     
 //    if (current_s != t_d) then
@@ -264,11 +265,11 @@ typedef struct
     }
     if (numberToDuplicate) {
         [queue insertObject:(id)videoFrame atIndex:0];
-        [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time-1] atIndex: 0];
+        [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time-1-ctx->first_pts] atIndex: 0];
     }
     if (!numberToDrop) {
         [queue insertObject:(id)videoFrame atIndex:0];
-        [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time] atIndex: 0];
+        [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time-ctx->first_pts] atIndex: 0];
     }
 
     [lock unlockWithCondition:QUEUE_HAS_BUFFERS];
@@ -1376,6 +1377,11 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (!ctx->started_recording) {
                 ctx->started_recording = true;
                 av_log(s, AV_LOG_INFO, "started recording audio queuesize: %d", [ctx->audio_queue count]);
+                if ([ctx->audio_queue count] > 0) {
+                    ctx->first_audio_pts = ctx->audio_time_queue[0];
+                } else {
+                    ctx->first_audio_pts = -1234;
+                }
                 [ctx->audio_queue removeAllObjects];
                 [ctx->audio_time_queue removeAllObjects];
             }
@@ -1397,6 +1403,10 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (asample_buffer) {
                 timestamp = [(NSNumber *)[ctx->audio_time_queue lastObject] unsignedLongValue];
                 asample_buffer = (CMSampleBufferRef)CFRetain(asample_buffer);
+                if (ctx->first_audio_pts == -1234) {
+                    ctx->first_audio_pts = timestamp;
+                }
+                timestamp = timestamp - ctx->first_audio_pts;
                 [ctx->audio_queue removeLastObject];
                 [ctx->audio_time_queue removeLastObject];
 

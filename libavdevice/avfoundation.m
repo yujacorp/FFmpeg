@@ -967,6 +967,14 @@ static int avf_read_header(AVFormatContext *s)
             }
 
             video_device = (AVCaptureDevice*) capture_screen_input;
+            int screen_idx = ctx->video_device_index - ctx->num_video_devices;
+            CGDisplayModeRef mode = CGDisplayCopyDisplayMode(screens[screen_idx]);
+            
+            float backingScaleFactor = [[NSScreen screens][screen_idx] backingScaleFactor];
+
+            ctx->width  = CGDisplayModeGetWidth(mode)*backingScaleFactor;
+            ctx->height = CGDisplayModeGetHeight(mode)*backingScaleFactor;
+
             capture_screen = 1;
 #endif
          } else {

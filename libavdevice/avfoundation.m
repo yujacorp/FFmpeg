@@ -482,8 +482,12 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
                 if (max_framerate - min_framerate < 0.5) {
                     oldCam = true;
                 }
+                
 
                 if (framerate <= (max_framerate + 0.01) && (min_framerate-0.01) <= framerate) {
+                    ctx->width      = dimensions.width;
+                    ctx->height     = dimensions.height;
+
                     selected_range = range;
                     break;
                 }
@@ -509,7 +513,7 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
         if (oldCam) {
             min_frame_duration = [selected_range valueForKey:@"minFrameDuration"];
         }
-        
+
         [video_device setValue:selected_format forKey:@"activeFormat"];
         [video_device setValue:min_frame_duration forKey:@"activeVideoMinFrameDuration"];
         [video_device setValue:min_frame_duration forKey:@"activeVideoMaxFrameDuration"];
@@ -743,27 +747,27 @@ static int get_video_config(AVFormatContext *s)
     }
 
     // Take stream info from the first frame.
-    while (ctx->frames_captured < 1) {
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, YES);
-    }
+//    while (ctx->frames_captured < 1) {
+//        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, YES);
+//    }
 
-    [ctx->lock lock];
+//    [ctx->lock lock];
 
     ctx->video_stream_index = stream->index;
 
     avpriv_set_pts_info(stream, 64, 1, avf_time_base);
 
-    sample_buffer     = (CMSampleBufferRef)[ctx->video_queue lastObject];
-    image_buffer      = CMSampleBufferGetImageBuffer(sample_buffer);
-    image_buffer_size = CVImageBufferGetEncodedSize(image_buffer);
+    //sample_buffer     = (CMSampleBufferRef)[ctx->video_queue lastObject];
+    //image_buffer      = CMSampleBufferGetImageBuffer(sample_buffer);
+    //image_buffer_size = CVImageBufferGetEncodedSize(image_buffer);
 
     stream->codec->codec_id   = AV_CODEC_ID_RAWVIDEO;
     stream->codec->codec_type = AVMEDIA_TYPE_VIDEO;
-    stream->codec->width      = (int)image_buffer_size.width;
-    stream->codec->height     = (int)image_buffer_size.height;
+    stream->codec->width      = ctx->width;
+    stream->codec->height     = ctx->height;
     stream->codec->pix_fmt    = ctx->pixel_format;
 
-    [ctx->lock unlockWithCondition:QUEUE_HAS_BUFFERS];
+//    [ctx->lock unlockWithCondition:QUEUE_HAS_BUFFERS];
 
 //    [ctx->video_queue removeLastObject];
 
@@ -782,19 +786,22 @@ static int get_audio_config(AVFormatContext *s)
     }
 
     // Take stream info from the first frame.
-    while (ctx->audio_frames_captured < 1) {
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, YES);
-    }
+//    while (ctx->audio_frames_captured < 1) {
+//        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, YES);
+//    }
 
-    [ctx->lock lock];
+    //[ctx->lock lock];
 
     ctx->audio_stream_index = stream->index;
 
     avpriv_set_pts_info(stream, 64, 1, avf_time_base);
 
-    sample_buffer = (CMSampleBufferRef)[ctx->audio_queue lastObject];
+//    sample_buffer = (CMSampleBufferRef)[ctx->audio_queue lastObject];
     format_desc = CMSampleBufferGetFormatDescription(sample_buffer);
-    const AudioStreamBasicDescription *basic_desc = CMAudioFormatDescriptionGetStreamBasicDescription(format_desc);
+    if (!ctx->audio_format) {
+        av_log(s, AV_LOG_ERROR, "audio format is null\n");
+    }
+    const AudioStreamBasicDescription *basic_desc = CMAudioFormatDescriptionGetStreamBasicDescription(ctx->audio_format.formatDescription);
 
     if (!basic_desc) {
         av_log(s, AV_LOG_ERROR, "audio format not available\n");
@@ -860,7 +867,7 @@ static int get_audio_config(AVFormatContext *s)
         }
     }
 
-    [ctx->lock unlockWithCondition:QUEUE_HAS_BUFFERS];
+    //[ctx->lock unlockWithCondition:QUEUE_HAS_BUFFERS];
 
     return 0;
 }
@@ -1072,10 +1079,6 @@ static int avf_read_header(AVFormatContext *s)
         bool skipFirst = true;
         for (AVCaptureDeviceFormat *format in audio_device.formats) {
             if (get_audio_codec_id(format) == AV_CODEC_ID_PCM_S16BE || get_audio_codec_id(format) == AV_CODEC_ID_PCM_S16LE) {
-                if (skipFirst) {
-                    skipFirst = false;
-                    continue;
-                }
                 ctx->audio_format       = format;
                 //                ctx->audio_format_index = idx;
                 av_log(ctx, AV_LOG_INFO, "Selected alternative audio format %d\n", idx);
@@ -1102,6 +1105,31 @@ static int avf_read_header(AVFormatContext *s)
 
         }
         
+    }
+    
+    if (ctx->audio_format) {
+        AudioStreamBasicDescription *audio_format_desc =
+        (AudioStreamBasicDescription*)CMAudioFormatDescriptionGetStreamBasicDescription(ctx->audio_format.formatDescription);
+        av_log(ctx, AV_LOG_INFO, "Format %d:\n", idx++);
+        av_log(ctx, AV_LOG_INFO, "\tsample rate     = %f\n",
+               audio_format_desc->mSampleRate);
+        av_log(ctx, AV_LOG_INFO, "\tchannels        = %d\n",
+               audio_format_desc->mChannelsPerFrame);
+        av_log(ctx, AV_LOG_INFO, "\tbits per sample = %d\n",
+               audio_format_desc->mBitsPerChannel);
+        av_log(ctx, AV_LOG_INFO, "\tfloat           = %d\n",
+               (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsFloat));
+        av_log(ctx, AV_LOG_INFO, "\tbig endian      = %d\n",
+               (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsBigEndian));
+        av_log(ctx, AV_LOG_INFO, "\tsigned integer  = %d\n",
+               (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsSignedInteger));
+        av_log(ctx, AV_LOG_INFO, "\tpacked          = %d\n",
+               (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsPacked));
+        av_log(ctx, AV_LOG_INFO, "\tnon interleaved = %d\n",
+               (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsNonInterleaved));
+        av_log(ctx, AV_LOG_INFO, "\tmask value = %d\n",
+               audio_format_desc->mFormatFlags);
+
     }
     
     /*!
@@ -1247,13 +1275,13 @@ static int avf_read_header(AVFormatContext *s)
 
     if (video_device) {
         if (ctx->video_device_index < ctx->num_video_devices) {
-            av_log(s, AV_LOG_DEBUG, "'%s' opened\n", [[video_device localizedName] UTF8String]);
+            av_log(s, AV_LOG_INFO, "'%s' opened\n", [[video_device localizedName] UTF8String]);
         } else {
-            av_log(s, AV_LOG_DEBUG, "'%s' opened\n", [[video_device description] UTF8String]);
+            av_log(s, AV_LOG_INFO, "'%s' opened\n", [[video_device description] UTF8String]);
         }
     }
     if (audio_device) {
-        av_log(s, AV_LOG_DEBUG, "audio device '%s' opened\n", [[audio_device localizedName] UTF8String]);
+        av_log(s, AV_LOG_INFO, "audio device '%s' opened\n", [[audio_device localizedName] UTF8String]);
     }
 
     // Initialize capture session
@@ -1263,6 +1291,13 @@ static int avf_read_header(AVFormatContext *s)
         goto fail;
     }
     if (audio_device && add_audio_device(s, audio_device)) {
+    }
+    
+    av_log(s, AV_LOG_INFO, "read header unlocking audio config\n");
+    
+    
+    if (audio_device) {
+        [audio_device unlockForConfiguration];
     }
 
     av_log(s, AV_LOG_INFO, "read header starting capture session\n");
@@ -1274,12 +1309,6 @@ static int avf_read_header(AVFormatContext *s)
      * does not reset the capture formats */
     if (!capture_screen) {
         [video_device unlockForConfiguration];
-    }
-    av_log(s, AV_LOG_INFO, "read header unlocking audio config\n");
-
-
-    if (audio_device) {
-        [audio_device unlockForConfiguration];
     }
     av_log(s, AV_LOG_INFO, "read header get video config\n");
 

@@ -27,6 +27,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#import <AppKit/AppKit.h>
 
 #include <pthread.h>
 

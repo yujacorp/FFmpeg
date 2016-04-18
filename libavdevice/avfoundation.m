@@ -428,6 +428,11 @@ static enum AVCodecID get_audio_codec_id(AVCaptureDeviceFormat *audio_format)
                audio_bits_per_sample == 32 &&
                audio_packed) {
         ret = audio_be ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
+    } else if (audio_linear &&
+                audio_signed_integer &&
+                audio_bits_per_sample == 32 &&
+                audio_packed) {
+        ret = audio_be ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
     }
     
     return ret;
@@ -1046,6 +1051,8 @@ static int avf_read_header(AVFormatContext *s)
     }
 
     int idx = 0;
+    av_log(ctx, AV_LOG_INFO, "Selecting audio format\n");
+
     for (AVCaptureDeviceFormat *format in audio_device.formats) {
         
         if (get_audio_codec_id(format) == AV_CODEC_ID_PCM_F32BE || get_audio_codec_id(format) == AV_CODEC_ID_PCM_F32LE) {
@@ -1057,16 +1064,132 @@ static int avf_read_header(AVFormatContext *s)
         }
         idx++;
     }
-    
+    idx = -1;
     if (!ctx->audio_format) {
+        av_log(ctx, AV_LOG_INFO, "Cannot find preferred audio format finding alternative %d\n", idx);
+        idx++;
+
+        bool skipFirst = true;
         for (AVCaptureDeviceFormat *format in audio_device.formats) {
-            if (get_audio_codec_id(format) != AV_CODEC_ID_NONE) {
+            if (get_audio_codec_id(format) == AV_CODEC_ID_PCM_S16BE || get_audio_codec_id(format) == AV_CODEC_ID_PCM_S16LE) {
+                if (skipFirst) {
+                    skipFirst = false;
+                    continue;
+                }
                 ctx->audio_format       = format;
                 //                ctx->audio_format_index = idx;
+                av_log(ctx, AV_LOG_INFO, "Selected alternative audio format %d\n", idx);
+                
+                break;
             }
+
         }
         
     }
+
+    idx = 0;
+    
+    if (!ctx->audio_format) {
+        av_log(ctx, AV_LOG_INFO, "Cannot find preferred audio format finding alternative 2 %d\n", idx);
+
+        for (AVCaptureDeviceFormat *format in audio_device.formats) {
+            if (get_audio_codec_id(format) != AV_CODEC_ID_NONE) {
+                av_log(ctx, AV_LOG_INFO, "Selected alternative 2 audio format %d\n", idx);
+                ctx->audio_format       = format;
+                //                ctx->audio_format_index = idx;
+            }
+            idx++;
+
+        }
+        
+    }
+    
+    /*!
+     @enum           Standard AudioFormatFlags Values for AudioStreamBasicDescription
+     @abstract       These are the standard AudioFormatFlags for use in the mFormatFlags field of the
+     AudioStreamBasicDescription structure.
+     @discussion     Typically, when an ASBD is being used, the fields describe the complete layout
+     of the sample data in the buffers that are represented by this description -
+     where typically those buffers are represented by an AudioBuffer that is
+     contained in an AudioBufferList.
+     
+     However, when an ASBD has the kAudioFormatFlagIsNonInterleaved flag, the
+     AudioBufferList has a different structure and semantic. In this case, the ASBD
+     fields will describe the format of ONE of the AudioBuffers that are contained in
+     the list, AND each AudioBuffer in the list is determined to have a single (mono)
+     channel of audio data. Then, the ASBD's mChannelsPerFrame will indicate the
+     total number of AudioBuffers that are contained within the AudioBufferList -
+     where each buffer contains one channel. This is used primarily with the
+     AudioUnit (and AudioConverter) representation of this list - and won't be found
+     in the AudioHardware usage of this structure.
+     @constant       kAudioFormatFlagIsFloat
+     Set for floating point, clear for integer.
+     @constant       kAudioFormatFlagIsBigEndian
+     Set for big endian, clear for little endian.
+     @constant       kAudioFormatFlagIsSignedInteger
+     Set for signed integer, clear for unsigned integer. This is only valid if
+     kAudioFormatFlagIsFloat is clear.
+     @constant       kAudioFormatFlagIsPacked
+     Set if the sample bits occupy the entire available bits for the channel,
+     clear if they are high or low aligned within the channel. Note that even if
+     this flag is clear, it is implied that this flag is set if the
+     AudioStreamBasicDescription is filled out such that the fields have the
+     following relationship:
+     ((mBitsPerSample / 8) * mChannelsPerFrame) == mBytesPerFrame
+     @constant       kAudioFormatFlagIsAlignedHigh
+     Set if the sample bits are placed into the high bits of the channel, clear
+     for low bit placement. This is only valid if kAudioFormatFlagIsPacked is
+     clear.
+     @constant       kAudioFormatFlagIsNonInterleaved
+     Set if the samples for each channel are located contiguously and the
+     channels are layed out end to end, clear if the samples for each frame are
+     layed out contiguously and the frames layed out end to end.
+     @constant       kAudioFormatFlagIsNonMixable
+     Set to indicate when a format is non-mixable. Note that this flag is only
+     used when interacting with the HAL's stream format information. It is not a
+     valid flag for any other uses.
+     @constant       kAudioFormatFlagsAreAllClear
+     Set if all the flags would be clear in order to preserve 0 as the wild card
+     value.
+     @constant       kLinearPCMFormatFlagIsFloat
+     Synonym for kAudioFormatFlagIsFloat.
+     @constant       kLinearPCMFormatFlagIsBigEndian
+     Synonym for kAudioFormatFlagIsBigEndian.
+     @constant       kLinearPCMFormatFlagIsSignedInteger
+     Synonym for kAudioFormatFlagIsSignedInteger.
+     @constant       kLinearPCMFormatFlagIsPacked
+     Synonym for kAudioFormatFlagIsPacked.
+     @constant       kLinearPCMFormatFlagIsAlignedHigh
+     Synonym for kAudioFormatFlagIsAlignedHigh.
+     @constant       kLinearPCMFormatFlagIsNonInterleaved
+     Synonym for kAudioFormatFlagIsNonInterleaved.
+     @constant       kLinearPCMFormatFlagIsNonMixable
+     Synonym for kAudioFormatFlagIsNonMixable.
+     @constant       kLinearPCMFormatFlagsAreAllClear
+     Synonym for kAudioFormatFlagsAreAllClear.
+     @constant       kLinearPCMFormatFlagsSampleFractionShift
+     The linear PCM flags contain a 6-bit bitfield indicating that an integer
+     format is to be interpreted as fixed point. The value indicates the number
+     of bits are used to represent the fractional portion of each sample value.
+     This constant indicates the bit position (counting from the right) of the
+     bitfield in mFormatFlags.
+     @constant       kLinearPCMFormatFlagsSampleFractionMask
+     number_fractional_bits = (mFormatFlags &
+     kLinearPCMFormatFlagsSampleFractionMask) >>
+     kLinearPCMFormatFlagsSampleFractionShift
+     @constant       kAppleLosslessFormatFlag_16BitSourceData
+     This flag is set for Apple Lossless data that was sourced from 16 bit native
+     endian signed integer data.
+     @constant       kAppleLosslessFormatFlag_20BitSourceData
+     This flag is set for Apple Lossless data that was sourced from 20 bit native
+     endian signed integer data aligned high in 24 bits.
+     @constant       kAppleLosslessFormatFlag_24BitSourceData
+     This flag is set for Apple Lossless data that was sourced from 24 bit native
+     endian signed integer data.
+     @constant       kAppleLosslessFormatFlag_32BitSourceData
+     This flag is set for Apple Lossless data that was sourced from 32 bit native
+     endian signed integer data.
+     */
 
     // list all audio formats if requested
     if (ctx->list_audio_formats) {
@@ -1093,6 +1216,9 @@ static int avf_read_header(AVFormatContext *s)
                        (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsPacked));
                 av_log(ctx, AV_LOG_INFO, "\tnon interleaved = %d\n",
                        (bool)(audio_format_desc->mFormatFlags & kAudioFormatFlagIsNonInterleaved));
+                av_log(ctx, AV_LOG_INFO, "\tmask value = %d\n",
+                       audio_format_desc->mFormatFlags);
+
             } else {
                 av_log(ctx, AV_LOG_INFO, "Format %d: (unsupported)\n", idx++);
             }
@@ -1139,26 +1265,37 @@ static int avf_read_header(AVFormatContext *s)
     if (audio_device && add_audio_device(s, audio_device)) {
     }
 
+    av_log(s, AV_LOG_INFO, "read header starting capture session\n");
+
     [ctx->capture_session startRunning];
+    av_log(s, AV_LOG_INFO, "read header unlocking video config\n");
 
     /* Unlock device configuration only after the session is started so it
      * does not reset the capture formats */
     if (!capture_screen) {
         [video_device unlockForConfiguration];
     }
+    av_log(s, AV_LOG_INFO, "read header unlocking audio config\n");
+
 
     if (audio_device) {
         [audio_device unlockForConfiguration];
     }
+    av_log(s, AV_LOG_INFO, "read header get video config\n");
 
+    
     if (video_device && get_video_config(s)) {
         goto fail;
     }
+    av_log(s, AV_LOG_INFO, "read header get audio config\n");
 
     // set audio stream
     if (audio_device && get_audio_config(s)) {
         goto fail;
     }
+    
+    av_log(s, AV_LOG_INFO, "read header finshed\n");
+
 
     [pool release];
     return 0;

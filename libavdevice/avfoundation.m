@@ -103,6 +103,9 @@ typedef struct
     AVCaptureDeviceFormat *audio_format;
 
     AVRational      framerate;
+    
+    int      framerate_actual;
+
     int             width, height;
 
     int             capture_cursor;
@@ -198,6 +201,8 @@ typedef struct
   didOutputSampleBuffer:(CMSampleBufferRef)videoFrame
          fromConnection:(AVCaptureConnection *)connection
 {
+//    NSDate *methodStart = [NSDate date];
+    
     NSMutableArray *queue = _context->video_queue;
     NSMutableArray *timeQueue = _context->video_time_queue;
     NSConditionLock *lock = _context->lock;
@@ -217,6 +222,7 @@ typedef struct
     
     if (ctx->first_packet_time == 0) {
         ctx->first_packet_time = pkt_time;
+        av_log(_context, AV_LOG_INFO, "first video packet time %ld\n", pkt_time);
         ctx->first_pts = pkt_time;
     }
     
@@ -231,12 +237,16 @@ typedef struct
 //            end
     int numberToDrop = 0;
     int numberToDuplicate = 0;
-    unsigned long time_s = (pkt_time - ctx->first_packet_time + 1000000/ctx->framerate.num/2)/1000000;
+    int framerate = ctx->framerate.num;
+//    if (ctx->framerate_actual != 0) {
+//        framerate = ctx->framerate_actual;
+//    }
+    unsigned long time_s = (pkt_time - ctx->first_packet_time + 1000000/framerate/2)/1000000;
     //av_log(_context, AV_LOG_WARNING, "time_s: %ld pkt_index: %ld first_pkt %ld framerate: %ld\n", time_s, ctx->pkt_index, ctx->first_packet_time, ctx->framerate.num);
 
     if (time_s != ctx->pkt_index) {
-        if (ctx->pkt_count != ctx->framerate.num) {
-            int diff = ctx->pkt_count - ctx->framerate.num;
+        if (ctx->pkt_count != framerate) {
+            int diff = ctx->pkt_count - framerate;
             if (diff > 0) {
                 ctx->pkt_count = 1 + diff - 1;
                 numberToDrop = 1;
@@ -263,6 +273,7 @@ typedef struct
         [queue removeLastObject];
         [timeQueue removeLastObject];
     }
+    
     if (numberToDuplicate) {
         [queue insertObject:(id)videoFrame atIndex:0];
         [timeQueue insertObject:[NSNumber numberWithUnsignedLong:pkt_time-1-ctx->first_pts] atIndex: 0];
@@ -275,6 +286,9 @@ typedef struct
     [lock unlockWithCondition:QUEUE_HAS_BUFFERS];
 
     ++_context->frames_captured;
+//    NSDate *methodFinish = [NSDate date];
+//    NSTimeInterval executionTime = [methodFinish timeIntervalSinceDate:methodStart];
+//    av_log(_context, AV_LOG_INFO, "executionTime = %f\n", executionTime);
 }
 
 @end
@@ -454,7 +468,10 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
 {
     AVFContext *ctx = (AVFContext*)s->priv_data;
 
-    double framerate = av_q2d(ctx->framerate);
+    double framerate = ctx->framerate.num;
+    if (ctx->framerate_actual != -1) {
+        framerate = ctx->framerate_actual;
+    }
     NSObject *range = nil;
     NSObject *format = nil;
     NSObject *selected_range = nil;
@@ -1380,7 +1397,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 if ([ctx->audio_queue count] > 0) {
                     ctx->first_audio_pts = ctx->audio_time_queue[0];
                 } else {
-                    ctx->first_audio_pts = -1234;
+                    ctx->first_audio_pts = -1234999;
                 }
                 [ctx->audio_queue removeAllObjects];
                 [ctx->audio_time_queue removeAllObjects];
@@ -1403,10 +1420,14 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (asample_buffer) {
                 timestamp = [(NSNumber *)[ctx->audio_time_queue lastObject] unsignedLongValue];
                 asample_buffer = (CMSampleBufferRef)CFRetain(asample_buffer);
-                if (ctx->first_audio_pts == -1234) {
+                if (ctx->first_audio_pts == -1234999) {
                     ctx->first_audio_pts = timestamp;
+                    av_log(s, AV_LOG_INFO, "late audio packet first packet time: %ld\n", ctx->first_audio_pts);
                 }
                 timestamp = timestamp - ctx->first_audio_pts;
+                if (timestamp < 0) {
+                    av_log(s, AV_LOG_INFO, "audio packet time less then zero: %ld\n", timestamp);
+                }
                 [ctx->audio_queue removeLastObject];
                 [ctx->audio_time_queue removeLastObject];
 
@@ -1629,6 +1650,7 @@ static const AVOption options[] = {
     { "audio_device_index", "select audio device by index for devices with same name (starts at 0)", offsetof(AVFContext, audio_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { "pixel_format", "set pixel format", offsetof(AVFContext, pixel_format), AV_OPT_TYPE_PIXEL_FMT, {.i64 = AV_PIX_FMT_YUV420P}, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM},
     { "framerate", "set frame rate", offsetof(AVFContext, framerate), AV_OPT_TYPE_VIDEO_RATE, {.str = "ntsc"}, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
+    { "framerate_actual", "set frame rate for actual capture", offsetof(AVFContext, framerate_actual), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { "video_size", "set video size", offsetof(AVFContext, width), AV_OPT_TYPE_IMAGE_SIZE, {.str = NULL}, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
     { "capture_cursor", "capture the screen cursor", offsetof(AVFContext, capture_cursor), AV_OPT_TYPE_INT, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
     { "capture_mouse_clicks", "capture the screen mouse clicks", offsetof(AVFContext, capture_mouse_clicks), AV_OPT_TYPE_INT, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },

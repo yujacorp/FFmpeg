@@ -244,26 +244,26 @@ typedef struct
     unsigned long time_s = (pkt_time - ctx->first_packet_time + 1000000/framerate/2)/1000000;
     //av_log(_context, AV_LOG_WARNING, "time_s: %ld pkt_index: %ld first_pkt %ld framerate: %ld\n", time_s, ctx->pkt_index, ctx->first_packet_time, ctx->framerate.num);
 
-    if (time_s != ctx->pkt_index) {
-        if (ctx->pkt_count != framerate) {
-            int diff = ctx->pkt_count - framerate;
-            if (diff > 0) {
-                ctx->pkt_count = 1 + diff - 1;
-                numberToDrop = 1;
-                av_log(_context, AV_LOG_WARNING, "dropping 1 packet %d \n", diff);
-            } else {
-                ctx->pkt_count = 1 + diff + 1;
-                numberToDuplicate = 1;
-                av_log(_context, AV_LOG_WARNING, "duplicating 1 packet %d \n", diff);
-            }
-        } else {
-            ctx->pkt_count = 1;
-        }
-        ctx->pkt_index = time_s;
-    } else {
-        ctx->pkt_count++;
-//        av_log(_context, AV_LOG_WARNING, "count %ld\n", ctx->pkt_count);
-    }
+//    if (time_s != ctx->pkt_index) {
+//        if (ctx->pkt_count != framerate) {
+//            int diff = ctx->pkt_count - framerate;
+//            if (diff > 0) {
+//                ctx->pkt_count = 1 + diff - 1;
+//                numberToDrop = 1;
+//                av_log(_context, AV_LOG_WARNING, "dropping 1 packet %d \n", diff);
+//            } else {
+//                ctx->pkt_count = 1 + diff + 1;
+//                numberToDuplicate = 1;
+//                av_log(_context, AV_LOG_WARNING, "duplicating 1 packet %d \n", diff);
+//            }
+//        } else {
+//            ctx->pkt_count = 1;
+//        }
+//        ctx->pkt_index = time_s;
+//    } else {
+//        ctx->pkt_count++;
+////        av_log(_context, AV_LOG_WARNING, "count %ld\n", ctx->pkt_count);
+//    }
     
     [lock lock];
     

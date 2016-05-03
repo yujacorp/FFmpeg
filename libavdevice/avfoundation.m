@@ -912,7 +912,7 @@ static int avf_read_header(AVFormatContext *s)
     ctx->num_video_devices = [devices count];
 
     ctx->first_pts          = av_gettime();
-    ctx->first_audio_pts    = av_gettime();
+    ctx->first_audio_pts    = -1;
 
     ctx->lock = [[NSConditionLock alloc] initWithCondition:QUEUE_IS_EMPTY];
     ctx->video_queue = [[NSMutableArray alloc] initWithCapacity:QUEUE_SIZE];
@@ -1406,13 +1406,15 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (!ctx->started_recording) {
                 ctx->started_recording = true;
                 av_log(s, AV_LOG_INFO, "started recording audio queuesize: %d", [ctx->audio_queue count]);
-                if ([ctx->audio_queue count] > 0) {
-                    ctx->first_audio_pts = ctx->audio_time_queue[0];
-                    av_log(s, AV_LOG_INFO, "audio packet start time: %ld", ctx->first_audio_pts);
-                } else {
-                    ctx->first_audio_pts = -1234999;
-                    av_log(s, AV_LOG_INFO, "audio queue empty setting pts later");
-                }
+//                if ([ctx->audio_queue count] > 0) {
+//                    ctx->first_audio_pts = [(NSNumber *)ctx->audio_time_queue[0] unsignedLongValue];
+//                    av_log(s, AV_LOG_INFO, "audio packet start time: %ld", ctx->first_audio_pts);
+//                } else {
+//                    ctx->first_audio_pts = -1234999;
+//                    av_log(s, AV_LOG_INFO, "audio queue empty setting pts later");
+//                }
+                 ctx->first_audio_pts = -2;
+
                 [ctx->audio_queue removeAllObjects];
                 [ctx->audio_time_queue removeAllObjects];
             }
@@ -1434,9 +1436,9 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (asample_buffer) {
                 timestamp = [(NSNumber *)[ctx->audio_time_queue lastObject] unsignedLongValue];
                 asample_buffer = (CMSampleBufferRef)CFRetain(asample_buffer);
-                if (ctx->first_audio_pts == -1234999) {
+                if (ctx->first_audio_pts == -2) {
                     ctx->first_audio_pts = timestamp;
-                    av_log(s, AV_LOG_INFO, "late audio packet first packet time: %ld\n", ctx->first_audio_pts);
+                    av_log(s, AV_LOG_INFO, "audio packet first packet time: %ld\n", ctx->first_audio_pts);
                 }
                 timestamp = timestamp - ctx->first_audio_pts;
                 if (timestamp < 0) {

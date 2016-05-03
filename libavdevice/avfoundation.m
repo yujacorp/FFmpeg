@@ -143,7 +143,6 @@ typedef struct
     int             audio_be;
     int             audio_signed_integer;
     int             audio_packed;
-    int             audio_non_interleaved;
 
     int32_t         *audio_buffer;
     int             audio_buffer_size;
@@ -212,12 +211,22 @@ typedef struct
     
     unsigned long pkt_time = 0;
 //    pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
+    
+    if (!CMSampleBufferDataIsReady(videoFrame)) {
+        av_log(_context, AV_LOG_WARNING, "videoFrame data is not ready\n");
+        return;
+    }
 
     if (CMSampleBufferGetOutputSampleTimingInfoArray(videoFrame, 1, &timing_info, &count) == noErr) {
+        if (timing_info.presentationTimeStamp.value == 0) {
+            av_log(_context, AV_LOG_WARNING, "timing_info is zero\n");
+            return;
+        }
         AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
         pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
     } else {
         av_log(_context, AV_LOG_WARNING, "vsample time info error\n");
+        return;
     }
     
     if (ctx->first_packet_time == 0) {
@@ -838,7 +847,6 @@ static int get_audio_config(AVFormatContext *s)
     ctx->audio_be              = basic_desc->mFormatFlags & kAudioFormatFlagIsBigEndian;
     ctx->audio_signed_integer  = basic_desc->mFormatFlags & kAudioFormatFlagIsSignedInteger;
     ctx->audio_packed          = basic_desc->mFormatFlags & kAudioFormatFlagIsPacked;
-    ctx->audio_non_interleaved = basic_desc->mFormatFlags & kAudioFormatFlagIsNonInterleaved;
     if (!ctx->audio_packed) {
         av_log(s, AV_LOG_WARNING, "audio is not packed!!!\n");
     }
@@ -876,15 +884,15 @@ static int get_audio_config(AVFormatContext *s)
         return 1;
     }
 
-    if (ctx->audio_non_interleaved) {
-        CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(sample_buffer);
-        ctx->audio_buffer_size        = CMBlockBufferGetDataLength(block_buffer);
-        ctx->audio_buffer             = av_malloc(ctx->audio_buffer_size);
-        if (!ctx->audio_buffer) {
-            av_log(s, AV_LOG_ERROR, "error allocating audio buffer\n");
-            return 1;
-        }
-    }
+//    if (ctx->audio_non_interleaved || true) {
+//        CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(sample_buffer);
+//        ctx->audio_buffer_size        = CMBlockBufferGetDataLength(block_buffer);
+//        ctx->audio_buffer             = av_malloc(ctx->audio_buffer_size);
+//        if (!ctx->audio_buffer) {
+//            av_log(s, AV_LOG_ERROR, "error allocating audio buffer\n");
+//            return 1;
+//        }
+//    }
 
     //[ctx->lock unlockWithCondition:QUEUE_HAS_BUFFERS];
 
@@ -1323,19 +1331,23 @@ static int avf_read_header(AVFormatContext *s)
     av_log(s, AV_LOG_INFO, "read header unlocking audio config\n");
     
     
-    if (audio_device) {
-        [audio_device unlockForConfiguration];
-    }
+    
 
     av_log(s, AV_LOG_INFO, "read header starting capture session\n");
 
     [ctx->capture_session startRunning];
     av_log(s, AV_LOG_INFO, "read header unlocking video config\n");
 
+    if (audio_device) {
+        [audio_device unlockForConfiguration];
+        [audio_device lockForConfiguration:nil];
+    }
+    
     /* Unlock device configuration only after the session is started so it
      * does not reset the capture formats */
     if (!capture_screen) {
         [video_device unlockForConfiguration];
+        [video_device lockForConfiguration:nil];
     }
     av_log(s, AV_LOG_INFO, "read header get video config\n");
 
@@ -1396,8 +1408,10 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 av_log(s, AV_LOG_INFO, "started recording audio queuesize: %d", [ctx->audio_queue count]);
                 if ([ctx->audio_queue count] > 0) {
                     ctx->first_audio_pts = ctx->audio_time_queue[0];
+                    av_log(s, AV_LOG_INFO, "audio packet start time: %ld", ctx->first_audio_pts);
                 } else {
                     ctx->first_audio_pts = -1234999;
+                    av_log(s, AV_LOG_INFO, "audio queue empty setting pts later");
                 }
                 [ctx->audio_queue removeAllObjects];
                 [ctx->audio_time_queue removeAllObjects];
@@ -1476,50 +1490,25 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 return AVERROR(EIO);
             }
             pkt->dts = pkt->pts = timestamp;
-//            CMItemCount count;
-//            CMSampleTimingInfo timing_info;
-//
-//            if (CMSampleBufferGetOutputSampleTimingInfoArray(vsample_buffer, 1, &timing_info, &count) == noErr) {
-////                pkt->pts = pkt->dts =
-////                unsigned long pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
-//                AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
-//                unsigned long pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
-////                unsigned long pkt_time = ctx->last_pkt_time+1;
-//                pkt->dts = pkt->pts = pkt_time;
-////                if (ctx->last_video_pkt_time != 0) {
-////                    pkt->duration = (pkt_time - ctx->last_video_pkt_time);
-////                }
-//                
-////                if (ctx->last_pkt_time != 0 && pkt_time - ctx->last_pkt_time > avf_time_base_q.den/2) {
-////                    av_log(s, AV_LOG_WARNING, "Detected large pkt diff\n");
-////                }
-//                ctx->last_video_pkt_time = pkt_time;
-//                
-////                pkt->dts = pkt->pts = 0;
-////                if (count > 1) {
-////                    av_log(s, AV_LOG_WARNING, "vsample CMSampleBufferGetOutputSampleTimingInfoArray count > 1\n");
-////                }
-//                
-////                ctx->video_log++;
-////                if (ctx->video_log > 60) {
-////                    ctx->video_log = 0;
-////                    av_log(s, AV_LOG_INFO, "vsample count: %ld timescale: %d avftimescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, avf_time_base_q.num, avf_time_base_q.den, timing_info.presentationTimeStamp.value, pkt_time);
-////
-//////                    av_log(s, AV_LOG_INFO, "vsample count: %ld timescale: %d avftimescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, avf_time_base_q.num, avf_time_base_q.den, timing_info.presentationTimeStamp.value, pkt->pts);
-////                }
-//                
-//
-//            } else {
-//                av_log(s, AV_LOG_DEBUG, "vsample time info error\n");
-//            }
 
             pkt->stream_index  = ctx->video_stream_index;
             pkt->flags        |= AV_PKT_FLAG_KEY;
 
             CVPixelBufferLockBaseAddress(image_buffer, 0);
-
-            data = CVPixelBufferGetBaseAddress(image_buffer);
-            memcpy(pkt->data, data, pkt->size);
+            
+            if (CVPixelBufferIsPlanar(image_buffer)) {
+                int8_t *dst = pkt->data;
+                int count = CVPixelBufferGetPlaneCount(image_buffer);
+                for (int i = 0; i < count;i++) {
+                    data = CVPixelBufferGetBaseAddressOfPlane(image_buffer, i);
+                    size_t data_size = CVPixelBufferGetBytesPerRowOfPlane(image_buffer, i) * CVPixelBufferGetHeightOfPlane(image_buffer, i);
+                    memcpy(dst, data, data_size);
+                    dst += data_size;
+                }
+            } else {
+                data = CVPixelBufferGetBaseAddress(image_buffer);
+                memcpy(pkt->data, data, pkt->size);
+            }
 
             CVPixelBufferUnlockBaseAddress(image_buffer, 0);
             CFRelease(vsample_buffer);
@@ -1531,64 +1520,44 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             int block_buffer_size         = CMBlockBufferGetDataLength(block_buffer);
 
             if (!block_buffer || !block_buffer_size) {
+                CFRelease(asample_buffer);
                 return AVERROR(EIO);
             }
+            
+            CMFormatDescriptionRef format_desc = CMSampleBufferGetFormatDescription(asample_buffer);
+            const AudioStreamBasicDescription *audio_format_desc = CMAudioFormatDescriptionGetStreamBasicDescription(format_desc);
+            int audio_non_interleaved = audio_format_desc->mFormatFlags & kAudioFormatFlagIsNonInterleaved;
+            
+            if (audio_non_interleaved && !ctx->audio_buffer) {
+                ctx -> audio_buffer = av_malloc(block_buffer_size);
+                ctx ->audio_buffer_size = block_buffer_size;
+                if (!ctx->audio_buffer) {
+                    av_log(ctx, AV_LOG_ERROR, "error allocation audio buffer\n");
+                    CFRelease(asample_buffer);
+                    return AVERROR(EIO);
+                }
+            }
 
-            if (ctx->audio_non_interleaved && block_buffer_size > ctx->audio_buffer_size) {
+            if (audio_non_interleaved && block_buffer_size > ctx->audio_buffer_size) {
+                CFRelease(asample_buffer);
                 return AVERROR_BUFFER_TOO_SMALL;
             }
 
             if (av_new_packet(pkt, block_buffer_size) < 0) {
+                CFRelease(asample_buffer);
                 return AVERROR(EIO);
             }
             pkt->dts = pkt->pts = timestamp;
 
-//            CMItemCount count;
-//            CMSampleTimingInfo timing_info;
-//
-//            if (CMSampleBufferGetOutputSampleTimingInfoArray(asample_buffer, 1, &timing_info, &count) == noErr) {
-//                if (count > 1) {
-//                    av_log(s, AV_LOG_WARNING, "asample CMSampleBufferGetOutputSampleTimingInfoArray count > 1\n");
-//                }
-//
-//                AVRational timebase_q = av_make_q(1, timing_info.presentationTimeStamp.timescale);
-////                pkt->pts = pkt->dts = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
-//                
-////                pkt->dts = pkt->pts = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
-////                pkt->dts = pkt->pts = 0;
-//                //                pkt->pts = pkt->dts = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
-////                unsigned long pkt_time = av_rescale_q(av_gettime(), AV_TIME_BASE_Q, avf_time_base_q);
-//                unsigned long pkt_time = av_rescale_q(timing_info.presentationTimeStamp.value, timebase_q, avf_time_base_q);
-//                
-////                if (ctx->last_audio_pkt_time != 0) {
-////                    pkt->duration = pkt_time - ctx->last_audio_pkt_time;
-////                }
-//
-//                pkt->dts = pkt->pts = pkt_time;
-////                if (ctx->last_pkt_time != 0 && pkt_time - ctx->last_pkt_time > avf_time_base_q.den/2) {
-////                    av_log(s, AV_LOG_WARNING, "Detected large pkt diff\n");
-////                }
-//                ctx->last_audio_pkt_time = pkt_time;
-////
-////                ctx->audio_log++;
-////                if (ctx->audio_log > 7*60) {
-////                    ctx->audio_log = 0;
-////                    av_log(s, AV_LOG_INFO, "asample count: %ld timescale: %d timescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, AV_TIME_BASE_Q.num, AV_TIME_BASE_Q.den, timing_info.presentationTimeStamp.value, pkt->pts);
-////
-//////                    av_log(s, AV_LOG_INFO, "asample count: %ld timescale: %d timescaleq: %d/%d value: %ld scaledValue: %ld\n", count, timing_info.presentationTimeStamp.timescale, timebase_q.num, timebase_q.den, timing_info.presentationTimeStamp.value, pkt->pts);
-////                }
-//            } else {
-//                av_log(s, AV_LOG_DEBUG, "asample time info error\n");
-//            }
-
             pkt->stream_index  = ctx->audio_stream_index;
             pkt->flags        |= AV_PKT_FLAG_KEY;
 
-            if (ctx->audio_non_interleaved) {
+            if (audio_non_interleaved) {
                 int sample, c, shift, num_samples;
 
                 OSStatus ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, ctx->audio_buffer);
                 if (ret != kCMBlockBufferNoErr) {
+                    CFRelease(asample_buffer);
                     return AVERROR(EIO);
                 }
 

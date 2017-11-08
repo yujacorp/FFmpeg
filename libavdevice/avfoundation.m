@@ -38,6 +38,7 @@
 #include "libavutil/internal.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/time.h"
+#include "libavutil/imgutils.h"
 #include "avdevice.h"
 
 #define QUEUE_SIZE 20
@@ -955,6 +956,7 @@ static int avf_read_header(AVFormatContext *s)
          goto fail;
     }
 
+    av_log(ctx, AV_LOG_INFO, "video_device_index: %d num_video_devices: %d num_screens: %d\n", ctx->video_device_index, ctx->num_video_devices, num_screens);
     // parse input filename for video and audio device
     parse_device_name(s);
 
@@ -1471,6 +1473,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             [ctx->lock unlock];
         }
 
+        // av_log(s, AV_LOG_INFO, "\nNew Code!\n");
         
         if (!ctx->started_recording) {
             continue;
@@ -1482,7 +1485,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
 //        }
         
         if (vsample_buffer != nil) {
-            void *data;
+            void *data; // data = CVPixelBufferGetBaseAddress
             CVImageBufferRef image_buffer;
 
             image_buffer = CMSampleBufferGetImageBuffer(vsample_buffer);
@@ -1496,9 +1499,21 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             pkt->stream_index  = ctx->video_stream_index;
             pkt->flags        |= AV_PKT_FLAG_KEY;
 
-            CVPixelBufferLockBaseAddress(image_buffer, 0);
+            // CVPixelBufferLockBaseAddress(image_buffer, 0);
+            int status = CVPixelBufferLockBaseAddress(image_buffer, 0);
+            if (status != kCVReturnSuccess) {
+                av_log(s, AV_LOG_ERROR, "Could not lock base address: %d\n", status);
+                return AVERROR_EXTERNAL;
+            }
             
+            int src_linesize[4];
+            const uint8_t *src_data[4];
+            int width  = CVPixelBufferGetWidth(image_buffer);
+            int height = CVPixelBufferGetHeight(image_buffer);
+
             if (CVPixelBufferIsPlanar(image_buffer)) {
+                /**
+                 * Changes from "Support interleaved audio dynamically" commit
                 int8_t *dst = pkt->data;
                 int count = CVPixelBufferGetPlaneCount(image_buffer);
                 for (int i = 0; i < count;i++) {
@@ -1507,14 +1522,29 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                     memcpy(dst, data, data_size);
                     dst += data_size;
                 }
+                **/
+                size_t plane_count = CVPixelBufferGetPlaneCount(image_buffer);
+                for (int i = 0; i < plane_count; i++) {
+                    src_linesize[i] = CVPixelBufferGetBytesPerRowOfPlane(image_buffer, i);
+                    src_data[i] = CVPixelBufferGetBaseAddressOfPlane(image_buffer, i);
+                }
             } else {
+                /**
                 data = CVPixelBufferGetBaseAddress(image_buffer);
                 memcpy(pkt->data, data, pkt->size);
+                **/
+                src_linesize[0] = CVPixelBufferGetBytesPerRow(image_buffer);
+                src_data[0] = CVPixelBufferGetBaseAddress(image_buffer);
             }
+
+            status = av_image_copy_to_buffer(pkt->data, pkt->size, src_data, src_linesize, ctx->pixel_format, width, height, 1);
 
             CVPixelBufferUnlockBaseAddress(image_buffer, 0);
             CFRelease(vsample_buffer);
             vsample_buffer = NULL;
+
+            if (status < 0)
+                return status;
         }
 
         else if (asample_buffer != nil) {

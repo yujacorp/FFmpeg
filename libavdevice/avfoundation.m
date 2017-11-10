@@ -145,6 +145,8 @@ typedef struct
     int             audio_signed_integer;
     int             audio_packed;
 
+    int             audio_packet_size;
+    
     int32_t         *audio_buffer;
     int             audio_buffer_size;
 
@@ -160,8 +162,14 @@ typedef struct
     
     NSMutableArray *video_time_queue;
     NSMutableArray *audio_time_queue;
+    
+    bool audioInterLog;
+    bool audioNonInterLog;
+    
+    AVStream* audioStream;
+    AVStream* videoStream;
 
-
+    int audio_packet_count;
 } AVFContext;
 
 /** FrameReciever class - delegate for AVCaptureSession
@@ -774,7 +782,7 @@ static int get_video_config(AVFormatContext *s)
     if (!stream) {
         return 1;
     }
-
+    ctx->videoStream = stream;
     // Take stream info from the first frame.
 //    while (ctx->frames_captured < 1) {
 //        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, YES);
@@ -813,6 +821,7 @@ static int get_audio_config(AVFormatContext *s)
     if (!stream) {
         return 1;
     }
+    ctx->audioStream = stream;
 
     // Take stream info from the first frame.
 //    while (ctx->audio_frames_captured < 1) {
@@ -1295,6 +1304,8 @@ static int avf_read_header(AVFormatContext *s)
 
     
     ctx->started_recording = false;
+    ctx->audioNonInterLog = false;
+    ctx->audioInterLog = false;
     ctx->dumpBuffer = false;
     ctx->audio_log = 0;
     ctx->video_log = 0;
@@ -1303,7 +1314,10 @@ static int avf_read_header(AVFormatContext *s)
     ctx->pkt_index = 0;
     ctx->pkt_count = 0;
     ctx->first_packet_time = 0;
-
+    ctx->audioStream = NULL;
+    ctx->videoStream = NULL;
+    ctx->audio_packet_size = 0;
+    ctx->audio_packet_count = 0;
     // Video nor Audio capture device not found, looking for AVMediaTypeVideo/Audio
     if (!video_device && !audio_device) {
         av_log(s, AV_LOG_ERROR, "No AV capture device found\n");
@@ -1548,6 +1562,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
         }
 
         else if (asample_buffer != nil) {
+            ctx->audio_packet_count++;
             CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(asample_buffer);
             int block_buffer_size         = CMBlockBufferGetDataLength(block_buffer);
 
@@ -1586,11 +1601,20 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             if (audio_non_interleaved) {
                 int sample, c, shift, num_samples;
-
+                bool shouldDumpAgain = false;
                 OSStatus ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, ctx->audio_buffer);
                 if (ret != kCMBlockBufferNoErr) {
                     CFRelease(asample_buffer);
                     return AVERROR(EIO);
+                }
+                
+                if (!ctx->audioNonInterLog) {
+                    ctx->audioNonInterLog = true;
+                    av_log(s, AV_LOG_INFO, "audio_non_interleaved recieved, pkt.size %d\n", pkt->size);
+                    if (ctx->audioStream) {
+                        // av_pkt_dump_log2(NULL, AV_LOG_INFO, pkt, 1, ctx->audioStream);
+                        shouldDumpAgain = true;
+                    }
                 }
 
                 num_samples = pkt->size / (ctx->audio_channels * (ctx->audio_bits_per_sample >> 3));
@@ -1618,8 +1642,35 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 } else {
                     INTERLEAVE_OUTPUT(32)
                 }
+                if (ctx->audio_packet_size != pkt->size) {
+                    av_log(s, AV_LOG_INFO, "pkt size changed from %d to %d\n", ctx->audio_packet_size, pkt->size);
+                    ctx->audio_packet_size = pkt->size;
+                }
+                //Test only to simulate an corrupted audio packet
+                //if (ctx->audio_packet_count == 2000) {
+                //    pkt->size = pkt->size - 2;
+                //}
+                if (shouldDumpAgain) {
+                    //av_pkt_dump_log2(NULL, AV_LOG_INFO, pkt, 1, ctx->audioStream);
+                }
             } else {
                 OSStatus ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, pkt->data);
+                if (!ctx->audioInterLog) {
+                    ctx->audioInterLog = true;
+                    av_log(s, AV_LOG_INFO, "audio_interleaved recieved pkt.size %d\n", pkt->size);
+                    if (ctx->audioStream) {
+                        //av_pkt_dump_log2(NULL, AV_LOG_INFO, pkt, 1, ctx->audioStream);
+                    }
+                }
+                if (ctx->audio_packet_size != pkt->size) {
+                    av_log(s, AV_LOG_INFO, "pkt size changed from %d to %d\n", ctx->audio_packet_size, pkt->size);
+                    ctx->audio_packet_size = pkt->size;
+                }
+                //Test only
+                //if (ctx->audio_packet_count == 2000) {
+                //    pkt->size = pkt->size - 2;
+                //}
+
                 if (ret != kCMBlockBufferNoErr) {
                     return AVERROR(EIO);
                 }

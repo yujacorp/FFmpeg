@@ -1061,6 +1061,12 @@ static int avf_read_header(AVFormatContext *s)
                 } else {
                     capture_screen_input.capturesMouseClicks = NO;
                 }
+                CGDisplayModeRef mode = CGDisplayCopyDisplayMode(screens[idx]);
+
+                float backingScaleFactor = [[NSScreen screens][idx] backingScaleFactor];
+
+                ctx->width  = CGDisplayModeGetWidth(mode)*backingScaleFactor;
+                ctx->height = CGDisplayModeGetHeight(mode)*backingScaleFactor;
             }
         }
 #endif

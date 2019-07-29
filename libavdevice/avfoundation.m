@@ -487,6 +487,10 @@ static int configure_video_device(AVFormatContext *s, AVCaptureDevice *video_dev
     AVFContext *ctx = (AVFContext*)s->priv_data;
 
     double framerate = ctx->framerate.num;
+    double den = ctx->framerate.den;
+    av_log(s, AV_LOG_INFO, "Get video framerate params (%f num and  %f den).",
+            framerate, den);
+    framerate = framerate / den;
     if (ctx->framerate_actual != -1) {
         framerate = ctx->framerate_actual;
     }
@@ -754,6 +758,8 @@ static int add_audio_device(AVFormatContext *s, AVCaptureDevice *audio_device)
     if (ctx->audio_format) {
         if ([audio_device lockForConfiguration:NULL] == YES) {
             audio_device.activeFormat = ctx->audio_format;
+            [audio_device unlockForConfiguration];
+            [audio_device lockForConfiguration:nil];
         } else {
             av_log(s, AV_LOG_ERROR, "Could not lock audio device for configuration");
             return AVERROR(EINVAL);
@@ -824,22 +830,22 @@ static int get_audio_config(AVFormatContext *s)
     ctx->audioStream = stream;
 
     // Take stream info from the first frame.
-//    while (ctx->audio_frames_captured < 1) {
-//        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, YES);
-//    }
 
+    while (ctx->audio_frames_captured < 1) {
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, YES);
+    }
     //[ctx->lock lock];
 
     ctx->audio_stream_index = stream->index;
 
     avpriv_set_pts_info(stream, 64, 1, avf_time_base);
 
-//    sample_buffer = (CMSampleBufferRef)[ctx->audio_queue lastObject];
+    sample_buffer = (CMSampleBufferRef)[ctx->audio_queue lastObject];
     format_desc = CMSampleBufferGetFormatDescription(sample_buffer);
     if (!ctx->audio_format) {
         av_log(s, AV_LOG_ERROR, "audio format is null\n");
     }
-    const AudioStreamBasicDescription *basic_desc = CMAudioFormatDescriptionGetStreamBasicDescription(ctx->audio_format.formatDescription);
+    const AudioStreamBasicDescription *basic_desc = CMAudioFormatDescriptionGetStreamBasicDescription(format_desc);
 
     if (!basic_desc) {
         av_log(s, AV_LOG_ERROR, "audio format not available\n");
@@ -1359,12 +1365,12 @@ static int avf_read_header(AVFormatContext *s)
 
     [ctx->capture_session startRunning];
     av_log(s, AV_LOG_INFO, "read header unlocking video config\n");
-
+    /*
     if (audio_device) {
         [audio_device unlockForConfiguration];
         [audio_device lockForConfiguration:nil];
     }
-    
+    */
     /* Unlock device configuration only after the session is started so it
      * does not reset the capture formats */
     if (!capture_screen) {
